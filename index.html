@@ -23,7 +23,7 @@
 <header class="masthead">
   <a class="brand" href="./" aria-label="Transmitter home">
     <img class="brand__icon" src="icon.svg" alt="" width="40" height="40">
-    <span class="brand__text">microservices.net.in<span class="brand__dot">·</span></span>
+    <span class="brand__text">OQTP<span class="brand__dot">·</span>2</span>
   </a>
   <a class="crosslink" href="https://microservices.net.in/FTQRR">
     <span class="crosslink__k">Other device</span>
@@ -91,6 +91,7 @@
       <dl class="specs">
         <div><dt>Size</dt><dd id="r-size">—</dd></div>
         <div><dt>Type</dt><dd id="r-type">—</dd></div>
+        <div><dt>Each frame carries</dt><dd id="r-frame">—</dd></div>
         <div><dt>Chunks</dt><dd id="r-chunks">—</dd></div>
         <div><dt>Frames on a clean run</dt><dd id="r-frames">—</dd></div>
         <div><dt>Realistic time</dt><dd id="r-time">—</dd></div>
@@ -103,14 +104,17 @@
       <p class="eyebrow">Transmission settings</p>
 
       <label class="field">
-        <span class="field__label">Data per frame</span>
+        <span class="field__label">Size of the code on screen</span>
         <select id="s-density">
-          <option value="120">Small — 120 B · easiest to read</option>
-          <option value="300" selected>Balanced — 300 B</option>
-          <option value="600">Large — 600 B · needs a steady hand</option>
-          <option value="1000">Very large — 1000 B · big screen only</option>
+          <option value="45">Small — 45×45 · easiest to read</option>
+          <option value="57">Compact — 57×57</option>
+          <option value="69" selected>Balanced — 69×69</option>
+          <option value="81">Large — 81×81</option>
+          <option value="93">Larger — 93×93 · needs a steady hand</option>
+          <option value="105">Dense — 105×105</option>
+          <option value="121">Very dense — 121×121 · big screen only</option>
         </select>
-        <span class="field__hint">Smaller codes survive blur, distance and cheap cameras.</span>
+        <span class="field__hint" id="density-hint"></span>
       </label>
 
       <div class="field">
@@ -141,10 +145,11 @@
       <label class="field">
         <span class="field__label">Error correction inside each code</span>
         <select id="s-ecc">
-          <option value="L">Low — smallest code</option>
+          <option value="L">Low — most data per code</option>
           <option value="M" selected>Medium</option>
           <option value="Q">High — survives glare and smudges</option>
         </select>
+        <span class="field__hint" id="ecc-hint"></span>
       </label>
 
       <label class="field field--check">
