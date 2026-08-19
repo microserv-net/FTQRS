@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Transmitter — Optical file transfer</title>
+<meta name="description" content="Send a file to another device using nothing but your screen and their camera.">
+<meta name="theme-color" content="#EFF1EC">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<header class="masthead">
+  <div class="mark">
+    <span class="mark__glyph" aria-hidden="true"></span>
+    <span class="mark__text">OQTP<span class="mark__dot">·</span>2</span>
+  </div>
+  <p class="mark__role">Transmitter</p>
+  <p class="mark__note">This device emits. Nothing leaves it over the network.</p>
+</header>
+
+<main>
+
+  <!-- ─────────────  STEP 1 · pick a file  ───────────── -->
+  <section id="stage-pick" class="stage">
+    <div class="drop" id="drop">
+      <input type="file" id="file" class="visually-hidden">
+      <div class="drop__inner">
+        <p class="drop__lead">Choose the file to send</p>
+        <p class="drop__sub">Drop it here, or</p>
+        <button type="button" class="btn btn--primary" id="pick">Browse files</button>
+        <p class="drop__fine">It is read in this browser and never uploaded.</p>
+      </div>
+    </div>
+
+    <div class="explain">
+      <h2 class="explain__title">How it works</h2>
+      <ol class="explain__list">
+        <li><span>The file is split into numbered chunks.</span></li>
+        <li><span>Each frame on screen is a QR code carrying one chunk — or an XOR blend of several.</span></li>
+        <li><span>The other device watches with its camera and rebuilds the file from whatever it manages to catch.</span></li>
+      </ol>
+      <p class="explain__aside">Missed frames are expected and cost nothing. The stream is endless: keep it running until the receiver says it's done.</p>
+    </div>
+  </section>
+
+  <!-- ─────────────  STEP 2 · confirm  ───────────── -->
+  <section id="stage-ready" class="stage" hidden>
+    <div class="card card--file">
+      <p class="eyebrow">Ready to send</p>
+      <h2 class="filename" id="r-name">—</h2>
+      <dl class="specs">
+        <div><dt>Size</dt><dd id="r-size">—</dd></div>
+        <div><dt>Type</dt><dd id="r-type">—</dd></div>
+        <div><dt>Chunks</dt><dd id="r-chunks">—</dd></div>
+        <div><dt>Frames on a clean run</dt><dd id="r-frames">—</dd></div>
+        <div><dt>Realistic time</dt><dd id="r-time">—</dd></div>
+        <div><dt>Fingerprint</dt><dd id="r-hash" class="hash">calculating…</dd></div>
+      </dl>
+    </div>
+
+    <div class="card">
+      <p class="eyebrow">Transmission settings</p>
+
+      <label class="field">
+        <span class="field__label">Data per frame</span>
+        <select id="s-density">
+          <option value="120">Small — 120 B · easiest to read</option>
+          <option value="300" selected>Balanced — 300 B</option>
+          <option value="600">Large — 600 B · needs a steady hand</option>
+          <option value="1000">Very large — 1000 B · big screen only</option>
+        </select>
+        <span class="field__hint" id="h-density">Smaller codes survive blur, distance and cheap cameras.</span>
+      </label>
+
+      <label class="field">
+        <span class="field__label">Frames per second</span>
+        <input type="range" id="s-fps" min="2" max="30" step="1" value="10">
+        <output class="field__out" id="o-fps">10 fps</output>
+        <span class="field__hint">Faster is only faster if the camera keeps up. Start at 10.</span>
+      </label>
+
+      <label class="field">
+        <span class="field__label">Error correction inside each code</span>
+        <select id="s-ecc">
+          <option value="L">Low — smallest code</option>
+          <option value="M" selected>Medium</option>
+          <option value="Q">High — survives glare and smudges</option>
+        </select>
+      </label>
+
+      <label class="field field--check">
+        <input type="checkbox" id="s-encrypt">
+        <span class="field__label">Encrypt with a password</span>
+      </label>
+      <div class="field" id="pw-wrap" hidden>
+        <input type="password" id="s-password" placeholder="Password the receiver will type" autocomplete="new-password">
+        <span class="field__hint">AES-256-GCM, key stretched with PBKDF2. Anyone who can see the screen sees only ciphertext.</span>
+      </div>
+
+      <div class="actions">
+        <button type="button" class="btn btn--primary btn--wide" id="start">Start transmitting</button>
+        <button type="button" class="btn btn--ghost" id="back">Choose a different file</button>
+      </div>
+      <p class="warn" id="ready-warn" hidden></p>
+    </div>
+  </section>
+
+  <!-- ─────────────  STEP 3 · transmitting  ───────────── -->
+  <section id="stage-send" class="stage stage--send" hidden>
+    <div class="beam">
+      <div class="beam__plate">
+        <canvas id="qr" width="600" height="600" aria-label="Transmitting frame"></canvas>
+      </div>
+      <p class="beam__caption"><span id="b-name">—</span> <span class="beam__sep">/</span> <span id="b-phase">—</span></p>
+    </div>
+
+    <aside class="rail">
+      <div class="telemetry">
+        <div class="tm tm--lead"><span class="tm__k">Frames sent</span><span class="tm__v" id="t-frames">0</span></div>
+        <div class="tm"><span class="tm__k">Rate</span><span class="tm__v" id="t-rate">—</span></div>
+        <div class="tm"><span class="tm__k">Throughput</span><span class="tm__v" id="t-tput">—</span></div>
+        <div class="tm"><span class="tm__k">Elapsed</span><span class="tm__v" id="t-elapsed">0s</span></div>
+        <div class="tm"><span class="tm__k">Chunks covered</span><span class="tm__v" id="t-cover">0</span></div>
+        <div class="tm"><span class="tm__k">Frame carries</span><span class="tm__v" id="t-degree">—</span></div>
+      </div>
+
+      <div class="ribbon-wrap">
+        <p class="eyebrow">Coverage — every chunk this run has put on screen at least once</p>
+        <canvas id="ribbon" class="ribbon" height="30"></canvas>
+        <p class="ribbon__legend"><span class="dot dot--sent"></span>sent <span class="dot dot--live"></span>on screen now</p>
+      </div>
+
+      <div class="controls">
+        <button type="button" class="btn btn--primary" id="pause">Pause</button>
+        <button type="button" class="btn" id="fullscreen">Full screen</button>
+        <button type="button" class="btn" id="restart">Start over</button>
+        <button type="button" class="btn btn--danger" id="stop">Stop</button>
+      </div>
+
+      <div class="live-tune">
+        <label class="field">
+          <span class="field__label">Speed</span>
+          <input type="range" id="l-fps" min="2" max="30" step="1" value="10">
+          <output class="field__out" id="l-fps-out">10 fps</output>
+        </label>
+        <p class="hint">Receiver dropping frames? Slow down. Nothing is lost by going slower.</p>
+      </div>
+
+      <p class="privacy">The file stayed on this device. The screen is the only thing carrying it.</p>
+    </aside>
+  </section>
+
+</main>
+
+<footer class="foot">
+  <p>Open the receiver page on the other device and point its camera here.</p>
+</footer>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

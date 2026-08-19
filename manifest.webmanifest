@@ -1,0 +1,11 @@
+{
+  "name": "OQTP Transmitter",
+  "short_name": "Transmit",
+  "description": "Send a file to another device using only your screen and their camera.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#EFF1EC",
+  "theme_color": "#EFF1EC",
+  "orientation": "any",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}
