@@ -499,7 +499,6 @@ function loop(now) {
     state.running = false;
     toast('Frame too large for one QR code. Pick a smaller "data per frame".', 6000);
   }
-  drawRibbon();
 }
 
 function phaseLabel(modules) {
@@ -543,6 +542,7 @@ function tickTelemetry() {
   } else {
     $('l-hint').textContent = 'Receiver dropping frames? Slow down. Nothing is lost by going slower.';
   }
+  drawRibbon(); // four times a second is plenty, and keeps the frame loop clear
   setTimeout(tickTelemetry, 250);
 }
 
@@ -553,44 +553,71 @@ const rctx = ribbon.getContext('2d');
 
 function sizeRibbon() {
   const dpr = Math.min(2, window.devicePixelRatio || 1);
-  ribbon.width = Math.max(1, Math.floor(ribbon.clientWidth * dpr));
+  const css = ribbon.clientWidth;
+  if (!css) {
+    // Measured while the panel was still hidden. Try again once laid out.
+    requestAnimationFrame(() => {
+      if (ribbon.clientWidth) sizeRibbon();
+    });
+    return;
+  }
+  ribbon.width = Math.max(1, Math.floor(css * dpr));
   ribbon.height = Math.floor(30 * dpr);
   drawRibbon();
 }
 window.addEventListener('resize', sizeRibbon);
+window.addEventListener('orientationchange', () => setTimeout(sizeRibbon, 250));
 
+/* One tick per chunk.
+
+   Cell edges are snapped to whole pixels: at fractional positions, a few
+   hundred chunks in a few hundred pixels half-cover each other and the strip
+   comes out dim and patchy rather than solid. Coverage is expressed with
+   globalAlpha against one fill colour instead of building an "rgba(...)"
+   string per column, which was hundreds of allocations per redraw. */
 function drawRibbon() {
   const W = ribbon.width;
   const H = ribbon.height;
+  if (!W || !H) return;
   rctx.clearRect(0, 0, W, H);
   if (!state.encoder || !state.covered) return;
+
   const K = state.encoder.K;
-  const live = new Set(state.liveIdx);
+  if (!K) return;
+  const live = state.liveIdx.length ? new Set(state.liveIdx) : null;
 
   if (K <= W) {
-    const w = W / K;
+    const gap = W / K >= 5 ? 1 : 0;
     for (let i = 0; i < K; i++) {
-      if (live.has(i)) rctx.fillStyle = '#e8ecf6';
-      else if (state.covered[i]) rctx.fillStyle = '#5b8cff';
-      else continue;
-      rctx.fillRect(i * w, 0, Math.max(1, w - (w > 3 ? 1 : 0)), H);
+      const isLive = live && live.has(i);
+      if (!isLive && !state.covered[i]) continue;
+      rctx.fillStyle = isLive ? '#e8ecf6' : '#5b8cff';
+      const x0 = Math.round((i * W) / K);
+      const x1 = Math.round(((i + 1) * W) / K);
+      rctx.fillRect(x0, 0, Math.max(1, x1 - x0 - gap), H);
     }
   } else {
-    const per = K / W;
+    rctx.fillStyle = '#5b8cff';
     for (let x = 0; x < W; x++) {
-      const from = Math.floor(x * per);
-      const to = Math.min(K, Math.floor((x + 1) * per));
+      const from = Math.floor((x * K) / W);
+      const to = Math.max(from + 1, Math.floor(((x + 1) * K) / W));
       let hit = 0;
       let isLive = false;
       for (let i = from; i < to; i++) {
         if (state.covered[i]) hit++;
-        if (live.has(i)) isLive = true;
+        if (live && live.has(i)) isLive = true;
       }
       if (!hit && !isLive) continue;
-      const f = hit / Math.max(1, to - from);
-      rctx.fillStyle = isLive ? '#e8ecf6' : `rgba(91,140,255,${0.25 + 0.75 * f})`;
+      if (isLive) {
+        rctx.globalAlpha = 1;
+        rctx.fillStyle = '#e8ecf6';
+      } else {
+        rctx.globalAlpha = 0.4 + 0.6 * (hit / (to - from));
+        rctx.fillStyle = '#5b8cff';
+      }
       rctx.fillRect(x, 0, 1, H);
     }
+    rctx.globalAlpha = 1;
   }
 }
 
