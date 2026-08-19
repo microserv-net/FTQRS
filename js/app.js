@@ -14,16 +14,20 @@ import { hashBlob, SHA256 } from './sha256.js';
 
 const $ = (id) => document.getElementById(id);
 
-/* Rough factor between "frames a perfect receiver needs" and "frames a real
-   one needs", measured on a simulated channel at ~15% loss. Used only for
-   the time estimate shown before starting. */
-const REALISM = 1.35;
+const REALISM = 1.35; // frames a real receiver needs vs a perfect one
 const META_EVERY = 20;
 const BIG_FILE = 64 * 1024 * 1024;
 
+const DEFAULTS = { fps: 10, frameBytes: 300, ecc: 'M', encrypt: false };
+
+/* Settings and transfer state are kept apart on purpose. Stopping a transfer
+   clears the transfer; it must never leave a control showing one thing while
+   the code believes another. */
+const settings = { ...DEFAULTS };
+
 const state = {
   file: null,
-  bytes: null, // what actually goes on the wire (ciphertext if encrypted)
+  bytes: null,
   meta: null,
   encoder: null,
   tid: 0,
@@ -31,27 +35,26 @@ const state = {
   frames: 0,
   running: false,
   paused: false,
-  fps: 10,
-  ecc: 'M',
-  frameBytes: 300,
   startedAt: 0,
   pausedFor: 0,
   pauseStart: 0,
   lastFrameAt: 0,
   fpsEMA: 0,
-  covered: null, // Uint8Array marking chunks put on screen this run
+  covered: null,
   coveredCount: 0,
   liveIdx: [],
+  plateModules: 0,
   wakeLock: null,
   plainHash: null,
   hashing: false,
-  plateModules: 0,
+  bench: null,
+  peakGoodput: 0,
 };
 
 /* ─────────────────────────  chrome  ───────────────────────── */
 
 let toastTimer;
-function toast(msg, ms = 2600) {
+function toast(msg, ms = 2800) {
   const t = $('toast');
   t.textContent = msg;
   t.hidden = false;
@@ -59,9 +62,190 @@ function toast(msg, ms = 2600) {
   toastTimer = setTimeout(() => (t.hidden = true), ms);
 }
 
+const STEPS = ['pick', 'ready', 'send'];
+
 function show(stage) {
-  for (const s of ['stage-pick', 'stage-ready', 'stage-send']) $(s).hidden = s !== stage;
+  for (const s of STEPS) $('stage-' + s).hidden = s !== stage;
+  const at = STEPS.indexOf(stage);
+  document.querySelectorAll('.path__step').forEach((el, i) => {
+    el.classList.toggle('is-current', i === at);
+    el.classList.toggle('is-done', i < at);
+  });
+  document.body.classList.toggle('is-live', stage === 'send');
+  window.scrollTo({ top: 0, behavior: 'instant' in window ? 'instant' : 'auto' });
 }
+
+/* ── one source of truth for every control ── */
+
+function syncSettingsUI() {
+  $('s-fps').value = settings.fps;
+  $('l-fps').value = settings.fps;
+  $('o-fps').textContent = settings.fps;
+  $('l-fps-out').textContent = settings.fps;
+  $('s-density').value = String(settings.frameBytes);
+  $('s-ecc').value = settings.ecc;
+  $('s-encrypt').checked = settings.encrypt;
+  $('pw-wrap').hidden = !settings.encrypt;
+  document.querySelectorAll('#fps-chips .chip').forEach((c) =>
+    c.classList.toggle('is-on', Number(c.dataset.fps) === settings.fps)
+  );
+  $('fps-hint').textContent =
+    settings.fps > 60
+      ? 'Above 60 needs a high-refresh screen on this side and a fast camera on the other. Watch the actual rate once running.'
+      : settings.fps > 30
+      ? 'Fast. Only worth it if the receiver reports a matching read rate.'
+      : 'Faster is only faster if the camera keeps up. Start at 10.';
+  refreshEstimate();
+}
+
+function setFps(v) {
+  settings.fps = Math.max(2, Math.min(120, Math.round(Number(v) || DEFAULTS.fps)));
+  syncSettingsUI();
+}
+
+$('s-fps').addEventListener('input', (e) => setFps(e.target.value));
+$('l-fps').addEventListener('input', (e) => setFps(e.target.value));
+$('fps-chips').addEventListener('click', (e) => {
+  const chip = e.target.closest('.chip');
+  if (chip) setFps(chip.dataset.fps);
+});
+$('s-density').addEventListener('change', (e) => {
+  settings.frameBytes = parseInt(e.target.value, 10);
+  syncSettingsUI();
+});
+$('s-ecc').addEventListener('change', (e) => {
+  settings.ecc = e.target.value;
+  syncSettingsUI();
+});
+$('s-encrypt').addEventListener('change', (e) => {
+  settings.encrypt = e.target.checked;
+  syncSettingsUI();
+});
+
+function chunkSize() {
+  return settings.frameBytes - DROPLET_OVERHEAD;
+}
+
+function refreshEstimate() {
+  if (!state.file) return;
+  const K = Math.max(1, Math.ceil((state.file.size + (settings.encrypt ? 16 : 0)) / chunkSize()));
+  const clean = K + Math.ceil(K / META_EVERY);
+  $('r-chunks').textContent = K.toLocaleString();
+  $('r-frames').textContent = clean.toLocaleString();
+  $('r-time').textContent = formatDuration((clean * REALISM) / settings.fps) + ` at ${settings.fps} fps`;
+}
+
+/* ────────────────  what this device can actually sustain  ────────────────
+
+   The configured frame rate is a request, not a result. Two things cap the
+   real one: how fast this screen refreshes, and how long a frame takes to
+   encode and paint. Denser frames carry more but cost more to build, so the
+   fastest setting and the fastest transfer are rarely the same thing — the
+   number worth maximising is bytes per second, not frames per second.  */
+
+const DENSITIES = [120, 300, 600, 1000];
+
+function measureRefresh(frames = 32) {
+  return new Promise((resolve) => {
+    let n = 0;
+    let t0 = 0;
+    const step = (t) => {
+      if (!t0) t0 = t;
+      n++;
+      if (n < frames) requestAnimationFrame(step);
+      else resolve((1000 * (frames - 1)) / (t - t0));
+    };
+    requestAnimationFrame(step);
+  });
+}
+
+const benchCanvas = document.createElement('canvas');
+const benchCtx = benchCanvas.getContext('2d', { alpha: false });
+
+/** Milliseconds to encode and paint one frame of a given size. */
+function frameCost(frameBytes, ecc, reps = 14) {
+  const payload = crypto.getRandomValues(new Uint8Array(Math.max(1, frameBytes - DROPLET_OVERHEAD)));
+  const draw = (seed) => {
+    const qr = qrcode(0, ecc);
+    qr.addData(bytesToLatin1(buildDroplet(1, seed, payload)), 'Byte');
+    qr.make();
+    const n = qr.getModuleCount();
+    const total = n + 8;
+    if (benchCanvas.width !== total) {
+      benchCanvas.width = total;
+      benchCanvas.height = total;
+    }
+    benchCtx.fillStyle = '#fff';
+    benchCtx.fillRect(0, 0, total, total);
+    benchCtx.fillStyle = '#000';
+    for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (qr.isDark(r, c)) benchCtx.fillRect(c + 4, r + 4, 1, 1);
+    return n;
+  };
+  for (let i = 0; i < 3; i++) draw(i); // warm up the JIT
+  const t0 = performance.now();
+  let modules = 0;
+  for (let i = 0; i < reps; i++) modules = draw(100 + i);
+  return { ms: (performance.now() - t0) / reps, modules };
+}
+
+async function runBenchmark() {
+  const btn = $('bench');
+  btn.disabled = true;
+  btn.textContent = 'Measuring…';
+  $('bench-out').hidden = false;
+  $('bench-out').innerHTML = '<p class="fine">Timing this screen…</p>';
+  await new Promise((r) => setTimeout(r, 30));
+
+  const measured = await measureRefresh();
+  // A backgrounded or throttled tab reports a refresh rate that is about the
+  // tab, not the screen. Below 24 Hz the number is not believable, so fall
+  // back to the common case and say so rather than recommending 6 fps.
+  const throttled = measured < 24;
+  const hz = throttled ? 60 : measured;
+  const rows = [];
+  for (const bytes of DENSITIES) {
+    const { ms, modules } = frameCost(bytes, settings.ecc);
+    // 0.85 leaves the main thread room for the rest of the page; a rate you
+    // cannot hold is worse than a slightly lower one you can.
+    const paintCap = (1000 / ms) * 0.85;
+    const fps = Math.max(2, Math.min(120, Math.floor(Math.min(hz, paintCap))));
+    rows.push({ bytes, ms, modules, fps, goodput: fps * (bytes - DROPLET_OVERHEAD), capped: paintCap < hz });
+    await new Promise((r) => setTimeout(r, 0));
+  }
+
+  const best = rows.reduce((a, b) => (b.goodput > a.goodput ? b : a));
+  state.bench = { hz, rows, best };
+
+  $('bench-out').innerHTML =
+    `<p class="bench__hz">Screen refresh <b>${hz.toFixed(0)} Hz</b>${
+      throttled ? ' (assumed — this tab looks throttled)' : ''
+    } · ${best.capped ? 'building the codes is the limit' : 'the screen is the limit, not the encoder'}</p>` +
+    rows
+      .map(
+        (r) =>
+          `<div class="bench__row${r === best ? ' is-best' : ''}"><span>${r.bytes} B</span>` +
+          `<span>QR ${r.modules}²</span><span>${r.ms.toFixed(1)} ms</span>` +
+          `<span>${r.fps} fps</span><b>${formatBytes(r.goodput)}/s</b></div>`
+      )
+      .join('') +
+    `<p class="fine">Highest sustainable rate on this screen: <b>${best.bytes} B</b> at <b>${best.fps} fps</b>, ` +
+    `about <b>${formatBytes(best.goodput)}/s</b>. This is a ceiling for this device only. Bigger codes carry more ` +
+    `but are harder to read across the gap, so if the receiver's count stalls, step down one size — its read rate ` +
+    `decides the real speed, not this measurement.</p>` +
+    `<button type="button" class="btn btn--primary" id="bench-apply">Use ${best.bytes} B at ${best.fps} fps</button>`;
+
+  $('bench-apply').addEventListener('click', () => {
+    settings.frameBytes = best.bytes;
+    settings.fps = best.fps;
+    syncSettingsUI();
+    toast(`Set to ${best.bytes} B at ${best.fps} fps — about ${formatBytes(best.goodput)}/s.`);
+  });
+
+  btn.disabled = false;
+  btn.textContent = 'Measure again';
+}
+
+$('bench').addEventListener('click', runBenchmark);
 
 /* ─────────────────────────  step 1  ───────────────────────── */
 
@@ -95,8 +279,8 @@ async function selectFile(file) {
   $('r-size').textContent = formatBytes(file.size);
   $('r-type').textContent = file.type || 'unknown';
   $('r-hash').textContent = 'calculating…';
-  show('stage-ready');
-  refreshEstimate();
+  show('ready');
+  syncSettingsUI();
 
   if (file.size === 0) {
     warn('That file is empty, so there is nothing to transmit.');
@@ -104,7 +288,11 @@ async function selectFile(file) {
     return;
   }
   $('start').disabled = false;
-  warn(file.size > BIG_FILE ? `${formatBytes(file.size)} over a camera link will take hours. This works, but a cable or a network share will not.` : '');
+  warn(
+    file.size > BIG_FILE
+      ? `${formatBytes(file.size)} over a camera link will take hours. It works, but a cable will not take hours.`
+      : ''
+  );
 
   state.hashing = true;
   const hash = await hashBlob(file, (p) => {
@@ -122,41 +310,11 @@ function warn(msg) {
   el.hidden = !msg;
 }
 
-/* ─────────────────────────  estimates  ───────────────────────── */
-
-function readSettings() {
-  state.frameBytes = parseInt($('s-density').value, 10);
-  state.fps = parseInt($('s-fps').value, 10);
-  state.ecc = $('s-ecc').value;
-}
-
-function chunkSize() {
-  return state.frameBytes - DROPLET_OVERHEAD;
-}
-
-function refreshEstimate() {
-  readSettings();
-  if (!state.file) return;
-  const encOverhead = $('s-encrypt').checked ? 16 : 0;
-  const K = Math.max(1, Math.ceil((state.file.size + encOverhead) / chunkSize()));
-  const clean = K + Math.ceil(K / META_EVERY);
-  $('r-chunks').textContent = K.toLocaleString();
-  $('r-frames').textContent = clean.toLocaleString();
-  $('r-time').textContent =
-    formatDuration((clean * REALISM) / state.fps) + ` at ${state.fps} fps`;
-  $('o-fps').textContent = state.fps + ' fps';
-}
-
-['s-density', 's-ecc'].forEach((id) => $(id).addEventListener('change', refreshEstimate));
-$('s-fps').addEventListener('input', refreshEstimate);
-$('s-encrypt').addEventListener('change', (e) => {
-  $('pw-wrap').hidden = !e.target.checked;
-  refreshEstimate();
-});
 $('back').addEventListener('click', () => {
   state.file = null;
+  state.plainHash = null;
   $('file').value = '';
-  show('stage-pick');
+  show('pick');
 });
 
 /* ─────────────────────────  encryption  ───────────────────────── */
@@ -180,9 +338,8 @@ async function encrypt(buffer, password) {
 
 $('start').addEventListener('click', async () => {
   if (!state.file) return;
-  readSettings();
 
-  if ($('s-encrypt').checked && !$('s-password').value) {
+  if (settings.encrypt && !$('s-password').value) {
     toast('Type a password, or turn encryption off.');
     return;
   }
@@ -199,13 +356,12 @@ $('start').addEventListener('click', async () => {
     let payload = raw;
     let encInfo = null;
 
-    if ($('s-encrypt').checked) {
+    if (settings.encrypt) {
       const { bytes, salt, iv } = await encrypt(raw, $('s-password').value);
       payload = bytes;
       encInfo = { s: b64(salt), i: b64(iv), it: 250000 };
     }
 
-    // Hash of exactly what the receiver will reconstruct.
     const streamHash = encInfo ? new SHA256().update(payload).hex() : state.plainHash;
 
     state.bytes = payload;
@@ -226,17 +382,19 @@ $('start').addEventListener('click', async () => {
     state.coveredCount = 0;
     state.seed = 0;
     state.frames = 0;
+    state.fpsEMA = 0;
+    state.lastFrameAt = 0;
     state.startedAt = performance.now();
     state.pausedFor = 0;
     state.paused = false;
     state.running = true;
+    state.peakGoodput = 0;
 
     measurePlate();
-
     $('b-name').textContent = state.file.name;
-    show('stage-send');
-    $('l-fps').value = state.fps;
-    $('l-fps-out').textContent = state.fps + ' fps';
+    $('pause').textContent = 'Pause';
+    show('send');
+    syncSettingsUI();
     sizeRibbon();
     requestWakeLock();
     requestAnimationFrame(loop);
@@ -257,8 +415,6 @@ const ctx = canvas.getContext('2d', { alpha: false });
 let lastDegree = 1;
 
 function nextPacket() {
-  // A metadata frame every META_EVERY frames, so a receiver that joins late
-  // (or looks away) learns the file's shape without restarting the sender.
   if (state.frames % META_EVERY === 0) {
     lastDegree = 0;
     state.liveIdx = [];
@@ -279,18 +435,17 @@ function nextPacket() {
 }
 
 function drawFrame(packet) {
-  const qr = qrcode(0, state.ecc);
+  const qr = qrcode(0, settings.ecc);
   qr.addData(bytesToLatin1(packet), 'Byte');
   qr.make();
 
   const n = qr.getModuleCount();
   const quiet = 4;
 
-  // The canvas is sized once, to the largest frame this transfer will ever
-  // produce, and every code is centred inside it. If the canvas resized per
-  // frame, CSS would scale each one differently and the module pitch would
-  // jump every time a metadata frame came round — which makes a camera
-  // hunt for focus twice a second. Constant pitch, no hunting.
+  // Sized once to the largest frame this transfer can produce, with every
+  // code centred inside it. If the canvas resized per frame, CSS would scale
+  // each one differently and the module pitch would jump every time a
+  // metadata frame came round, making the camera re-hunt for focus.
   const total = Math.max(state.plateModules, n + quiet * 2);
   if (canvas.width !== total) {
     canvas.width = total;
@@ -309,12 +464,11 @@ function drawFrame(packet) {
   return n;
 }
 
-/** Measure the biggest code this transfer can generate, before starting. */
 function measurePlate() {
   let max = 0;
   const probes = [buildMeta(state.tid, state.meta), buildDroplet(state.tid, 0, state.encoder.droplet(0))];
   for (const p of probes) {
-    const qr = qrcode(0, state.ecc);
+    const qr = qrcode(0, settings.ecc);
     qr.addData(bytesToLatin1(p), 'Byte');
     qr.make();
     max = Math.max(max, qr.getModuleCount() + 8);
@@ -327,7 +481,7 @@ function loop(now) {
   requestAnimationFrame(loop);
   if (state.paused) return;
 
-  const interval = 1000 / state.fps;
+  const interval = 1000 / settings.fps;
   if (state.lastFrameAt && now - state.lastFrameAt < interval - 1) return;
 
   if (state.lastFrameAt) {
@@ -337,8 +491,7 @@ function loop(now) {
   state.lastFrameAt = now;
 
   try {
-    const packet = nextPacket();
-    const modules = drawFrame(packet);
+    const modules = drawFrame(nextPacket());
     state.frames++;
     if (state.frames % 12 === 0) $('b-phase').textContent = phaseLabel(modules);
   } catch (err) {
@@ -353,7 +506,7 @@ function phaseLabel(modules) {
   const K = state.encoder.K;
   const version = (modules - 17) / 4;
   const phase = state.seed < K ? `first pass ${state.seed}/${K}` : 'repair stream';
-  return `${phase} · QR v${version} · ${state.ecc}`;
+  return `${phase} · QR v${version} · ${settings.ecc}`;
 }
 
 /* ─────────────────────────  telemetry  ───────────────────────── */
@@ -367,17 +520,33 @@ function tickTelemetry() {
   const K = state.encoder.K;
   $('t-frames').textContent = state.frames.toLocaleString();
   $('t-rate').textContent = state.fpsEMA ? state.fpsEMA.toFixed(1) + ' fps' : '—';
-  $('t-tput').textContent = state.fpsEMA
-    ? formatBytes(state.fpsEMA * chunkSize()) + '/s'
-    : '—';
+  if (state.fpsEMA) {
+    const goodput = state.fpsEMA * chunkSize();
+    // ignore the first second, where the average has not settled
+    if (elapsed() > 1.5 && goodput > state.peakGoodput) state.peakGoodput = goodput;
+    $('t-tput').textContent = formatBytes(goodput) + '/s';
+    $('t-peak').textContent = state.peakGoodput ? formatBytes(state.peakGoodput) + '/s' : '—';
+  } else {
+    $('t-tput').textContent = '—';
+  }
   $('t-elapsed').textContent = formatDuration(elapsed());
   $('t-cover').textContent = `${state.coveredCount.toLocaleString()} / ${K.toLocaleString()}`;
   $('t-degree').textContent =
     lastDegree === 0 ? 'file details' : lastDegree === 1 ? '1 chunk' : `${lastDegree} chunks blended`;
+
+  // If the screen cannot keep up with the asked-for rate, say so rather than
+  // letting the number quietly lie.
+  if (state.fpsEMA && settings.fps > 20 && state.fpsEMA < settings.fps * 0.8) {
+    $('l-hint').textContent = `This screen is managing ${state.fpsEMA.toFixed(
+      0
+    )} fps, not ${settings.fps}. Lowering the setting will not slow it down.`;
+  } else {
+    $('l-hint').textContent = 'Receiver dropping frames? Slow down. Nothing is lost by going slower.';
+  }
   setTimeout(tickTelemetry, 250);
 }
 
-/* ── the ribbon: one tick per chunk, the same shape on both devices ── */
+/* ── the ribbon: one tick per chunk, mirrored on the receiver ── */
 
 const ribbon = $('ribbon');
 const rctx = ribbon.getContext('2d');
@@ -391,18 +560,18 @@ function sizeRibbon() {
 window.addEventListener('resize', sizeRibbon);
 
 function drawRibbon() {
-  if (!state.encoder) return;
-  const K = state.encoder.K;
   const W = ribbon.width;
   const H = ribbon.height;
   rctx.clearRect(0, 0, W, H);
+  if (!state.encoder || !state.covered) return;
+  const K = state.encoder.K;
   const live = new Set(state.liveIdx);
 
   if (K <= W) {
     const w = W / K;
     for (let i = 0; i < K; i++) {
-      if (live.has(i)) rctx.fillStyle = '#12161a';
-      else if (state.covered[i]) rctx.fillStyle = '#1f3bd6';
+      if (live.has(i)) rctx.fillStyle = '#e8ecf6';
+      else if (state.covered[i]) rctx.fillStyle = '#5b8cff';
       else continue;
       rctx.fillRect(i * w, 0, Math.max(1, w - (w > 3 ? 1 : 0)), H);
     }
@@ -419,7 +588,7 @@ function drawRibbon() {
       }
       if (!hit && !isLive) continue;
       const f = hit / Math.max(1, to - from);
-      rctx.fillStyle = isLive ? '#12161a' : `rgba(31,59,214,${0.25 + 0.75 * f})`;
+      rctx.fillStyle = isLive ? '#e8ecf6' : `rgba(91,140,255,${0.25 + 0.75 * f})`;
       rctx.fillRect(x, 0, 1, H);
     }
   }
@@ -428,6 +597,7 @@ function drawRibbon() {
 /* ─────────────────────────  controls  ───────────────────────── */
 
 $('pause').addEventListener('click', () => {
+  if (!state.running) return;
   state.paused = !state.paused;
   $('pause').textContent = state.paused ? 'Resume' : 'Pause';
   if (state.paused) {
@@ -441,38 +611,73 @@ $('pause').addEventListener('click', () => {
 });
 
 $('restart').addEventListener('click', () => {
+  if (!state.encoder) return;
   state.seed = 0;
   state.frames = 0;
   state.covered.fill(0);
   state.coveredCount = 0;
+  state.liveIdx = [];
   state.startedAt = performance.now();
   state.pausedFor = 0;
+  state.fpsEMA = 0;
+  state.lastFrameAt = 0;
+  drawRibbon();
   toast('Back to the first chunk.');
 });
 
-$('stop').addEventListener('click', () => {
+/* Stopping tears the transfer down completely and puts every control back in
+   step with it — the settings the person chose are kept, because they chose
+   them, but nothing is left showing a stale value. */
+$('stop').addEventListener('click', stopTransfer);
+
+function stopTransfer() {
   state.running = false;
+  state.paused = false;
+  state.encoder = null;
+  state.bytes = null;
+  state.meta = null;
+  state.covered = null;
+  state.coveredCount = 0;
+  state.liveIdx = [];
+  state.seed = 0;
+  state.frames = 0;
+  state.fpsEMA = 0;
+  state.lastFrameAt = 0;
+  state.pausedFor = 0;
+  state.plateModules = 0;
+
+  lastDegree = 1;
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  drawRibbon();
+
+  $('pause').textContent = 'Pause';
+  $('b-phase').textContent = '—';
+  $('t-frames').textContent = '0';
+  $('t-rate').textContent = '—';
+  $('t-tput').textContent = '—';
+  $('t-elapsed').textContent = '0s';
+  $('t-cover').textContent = '0';
+  $('t-degree').textContent = '—';
+  $('t-peak').textContent = '—';
+  state.peakGoodput = 0;
+
   releaseWakeLock();
   exitFull();
-  show('stage-ready');
-});
-
-$('l-fps').addEventListener('input', (e) => {
-  state.fps = parseInt(e.target.value, 10);
-  $('l-fps-out').textContent = state.fps + ' fps';
-  $('s-fps').value = state.fps;
-});
+  show('ready');
+  syncSettingsUI();
+}
 
 $('fullscreen').addEventListener('click', async () => {
-  if (document.fullscreenElement) {
+  if (document.body.classList.contains('is-full')) {
     exitFull();
   } else {
+    document.body.classList.add('is-full');
     try {
       await document.documentElement.requestFullscreen();
     } catch (e) {
-      /* some browsers refuse; the class still gives a clean plate */
+      /* some browsers refuse; the class alone still gives a clean plate */
     }
-    document.body.classList.add('is-full');
   }
 });
 
@@ -488,12 +693,12 @@ document.addEventListener('fullscreenchange', () => {
 
 document.addEventListener('keydown', (e) => {
   if (!state.running) return;
-  if (e.code === 'Space') {
+  if (e.code === 'Space' && e.target.tagName !== 'INPUT' && e.target.tagName !== 'BUTTON') {
     e.preventDefault();
     $('pause').click();
   } else if (e.key === 'f') {
     $('fullscreen').click();
-  } else if (e.key === 'Escape' && document.body.classList.contains('is-full')) {
+  } else if (e.key === 'Escape') {
     exitFull();
   }
 });
@@ -516,10 +721,52 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && state.running && !state.paused) requestWakeLock();
 });
 
-/* ─────────────────────────  offline shell  ───────────────────────── */
+/* ─────────────────────────  depth  ───────────────────────── */
+
+const calm = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+// Panels lean fractionally towards the pointer. Off during transmission,
+// where the frame loop owns the main thread.
+if (!calm && window.matchMedia('(pointer: fine)').matches) {
+  let queued = false;
+  window.addEventListener('pointermove', (e) => {
+    if (queued || document.body.classList.contains('is-live')) return;
+    queued = true;
+    requestAnimationFrame(() => {
+      queued = false;
+      const cx = window.innerWidth / 2;
+      const cy = window.innerHeight / 2;
+      const rx = ((e.clientY - cy) / cy) * -2.2;
+      const ry = ((e.clientX - cx) / cx) * 2.2;
+      document.querySelectorAll('[data-tilt]').forEach((el) => {
+        el.style.transform = `rotateX(${rx.toFixed(2)}deg) rotateY(${ry.toFixed(2)}deg)`;
+      });
+    });
+  });
+}
+
+const io = new IntersectionObserver(
+  (entries) => {
+    for (const en of entries) {
+      if (en.isIntersecting) {
+        en.target.classList.add('in');
+        io.unobserve(en.target);
+      }
+    }
+  },
+  { threshold: 0.18 }
+);
+document.querySelectorAll('.reveal').forEach((el, i) => {
+  el.style.transitionDelay = i * 90 + 'ms';
+  io.observe(el);
+});
 
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 
-refreshEstimate();
+syncSettingsUI();
+show('pick');
+
+const cue = document.getElementById('cue');
+if (cue) cue.addEventListener('click', () => document.getElementById('journey').scrollIntoView({ behavior: 'smooth', block: 'center' }));
