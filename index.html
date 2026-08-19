@@ -5,49 +5,87 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Transmitter — Optical file transfer</title>
 <meta name="description" content="Send a file to another device using nothing but your screen and their camera.">
-<meta name="theme-color" content="#EFF1EC">
+<meta name="theme-color" content="#05070C">
+<meta name="color-scheme" content="dark">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.svg">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
 
+<div class="scape" aria-hidden="true">
+  <div class="scape__aurora"></div>
+  <div class="scape__floor"></div>
+  <div class="scape__vignette"></div>
+</div>
+
 <header class="masthead">
-  <div class="mark">
-    <span class="mark__glyph" aria-hidden="true"></span>
-    <span class="mark__text">OQTP<span class="mark__dot">·</span>2</span>
-  </div>
-  <p class="mark__role">Transmitter</p>
-  <p class="mark__note">This device emits. Nothing leaves it over the network.</p>
+  <a class="brand" href="./" aria-label="Transmitter home">
+    <img class="brand__icon" src="icon.svg" alt="" width="40" height="40">
+    <span class="brand__text">microservices.net.in<span class="brand__dot">·</span></span>
+  </a>
+  <a class="crosslink" href="https://microservices.net.in/FTQRR">
+    <span class="crosslink__k">Other device</span>
+    <span class="crosslink__v">Open the receiver</span>
+    <span class="crosslink__arrow" aria-hidden="true">→</span>
+  </a>
 </header>
 
-<main>
+<section class="hero" id="hero">
+  <p class="eyebrow">Optical transport · no server, no pairing</p>
+  <h1 class="hero__title"><span class="hero__word">Trans</span><span class="hero__word hero__word--accent">mitter</span></h1>
+  <p class="hero__sub">This screen becomes the cable. Your file is split into chunks, blended into a stream of codes, and thrown at the other device's camera until it has everything.</p>
+</section>
 
-  <!-- ─────────────  STEP 1 · pick a file  ───────────── -->
+<!-- guided path -->
+<ol class="path" id="path">
+  <li class="path__step is-current" data-step="pick"><b>01</b><span>Choose a file</span></li>
+  <li class="path__step" data-step="ready"><b>02</b><span>Tune the stream</span></li>
+  <li class="path__step" data-step="send"><b>03</b><span>Transmit</span></li>
+</ol>
+
+<main class="deck">
+
+  <!-- ── 01 ── -->
   <section id="stage-pick" class="stage">
-    <div class="drop" id="drop">
+    <div class="slab slab--drop" id="drop" data-tilt>
       <input type="file" id="file" class="visually-hidden">
+      <div class="slab__glow"></div>
       <div class="drop__inner">
+        <img class="drop__art" src="icon.svg" alt="" width="96" height="96">
         <p class="drop__lead">Choose the file to send</p>
-        <p class="drop__sub">Drop it here, or</p>
-        <button type="button" class="btn btn--primary" id="pick">Browse files</button>
-        <p class="drop__fine">It is read in this browser and never uploaded.</p>
+        <p class="drop__sub">Drop it anywhere on this panel, or</p>
+        <button type="button" class="btn btn--primary btn--big" id="pick">Browse files</button>
+        <p class="fine">Read in this browser. Never uploaded.</p>
       </div>
     </div>
 
-    <div class="explain">
-      <h2 class="explain__title">How it works</h2>
-      <ol class="explain__list">
-        <li><span>The file is split into numbered chunks.</span></li>
-        <li><span>Each frame on screen is a QR code carrying one chunk — or an XOR blend of several.</span></li>
-        <li><span>The other device watches with its camera and rebuilds the file from whatever it manages to catch.</span></li>
-      </ol>
-      <p class="explain__aside">Missed frames are expected and cost nothing. The stream is endless: keep it running until the receiver says it's done.</p>
+    <button type="button" class="cue" id="cue"><span>How it works</span><i aria-hidden="true">↓</i></button>
+
+    <div class="journey" id="journey">
+      <article class="slab reveal" data-tilt>
+        <p class="eyebrow">On this device</p>
+        <h2 class="slab__title">Split, then blended</h2>
+        <p class="slab__body">The file is cut into numbered chunks. Each frame you see is one chunk — or several XOR'd together into a single code that can stand in for any of them.</p>
+      </article>
+      <article class="slab reveal" data-tilt>
+        <p class="eyebrow">On the other device</p>
+        <h2 class="slab__title">Catch what you can</h2>
+        <p class="slab__body">Missed frames cost nothing. There is no request for a resend, because no frame is worth more than the next one. The camera simply keeps watching until the file solves.</p>
+      </article>
+      <article class="slab reveal" data-tilt>
+        <p class="eyebrow">At the end</p>
+        <h2 class="slab__title">Checked, then saved</h2>
+        <p class="slab__body">The rebuilt file is hashed and compared against this one before it is offered to anybody. Nothing is written over there until they press save.</p>
+      </article>
     </div>
   </section>
 
-  <!-- ─────────────  STEP 2 · confirm  ───────────── -->
+  <!-- ── 02 ── -->
   <section id="stage-ready" class="stage" hidden>
-    <div class="card card--file">
+    <div class="slab slab--file" data-tilt>
+      <div class="slab__glow"></div>
       <p class="eyebrow">Ready to send</p>
       <h2 class="filename" id="r-name">—</h2>
       <dl class="specs">
@@ -58,9 +96,10 @@
         <div><dt>Realistic time</dt><dd id="r-time">—</dd></div>
         <div><dt>Fingerprint</dt><dd id="r-hash" class="hash">calculating…</dd></div>
       </dl>
+      <p class="warn" id="ready-warn" hidden></p>
     </div>
 
-    <div class="card">
+    <div class="slab">
       <p class="eyebrow">Transmission settings</p>
 
       <label class="field">
@@ -71,15 +110,33 @@
           <option value="600">Large — 600 B · needs a steady hand</option>
           <option value="1000">Very large — 1000 B · big screen only</option>
         </select>
-        <span class="field__hint" id="h-density">Smaller codes survive blur, distance and cheap cameras.</span>
+        <span class="field__hint">Smaller codes survive blur, distance and cheap cameras.</span>
       </label>
 
-      <label class="field">
+      <div class="field">
         <span class="field__label">Frames per second</span>
-        <input type="range" id="s-fps" min="2" max="30" step="1" value="10">
-        <output class="field__out" id="o-fps">10 fps</output>
-        <span class="field__hint">Faster is only faster if the camera keeps up. Start at 10.</span>
-      </label>
+        <div class="slider">
+          <input type="range" id="s-fps" min="2" max="120" step="1" value="10">
+          <output class="slider__out" id="o-fps">10</output>
+        </div>
+        <div class="chips" id="fps-chips">
+          <button type="button" class="chip" data-fps="5">5</button>
+          <button type="button" class="chip is-on" data-fps="10">10</button>
+          <button type="button" class="chip" data-fps="15">15</button>
+          <button type="button" class="chip" data-fps="24">24</button>
+          <button type="button" class="chip" data-fps="30">30</button>
+          <button type="button" class="chip" data-fps="60">60</button>
+          <button type="button" class="chip" data-fps="120">120</button>
+        </div>
+        <span class="field__hint" id="fps-hint">Faster is only faster if the camera keeps up. Start at 10.</span>
+      </div>
+
+      <div class="field">
+        <span class="field__label">Maximum this device can sustain</span>
+        <button type="button" class="btn" id="bench">Measure my maximum</button>
+        <span class="field__hint">Times the screen refresh and the cost of building each code, then reports the settings with the highest bytes per second — which is not always the highest frame rate.</span>
+        <div class="bench" id="bench-out" hidden></div>
+      </div>
 
       <label class="field">
         <span class="field__label">Error correction inside each code</span>
@@ -96,40 +153,40 @@
       </label>
       <div class="field" id="pw-wrap" hidden>
         <input type="password" id="s-password" placeholder="Password the receiver will type" autocomplete="new-password">
-        <span class="field__hint">AES-256-GCM, key stretched with PBKDF2. Anyone who can see the screen sees only ciphertext.</span>
+        <span class="field__hint">AES-256-GCM, key stretched with PBKDF2. Anyone filming the screen gets ciphertext.</span>
       </div>
 
       <div class="actions">
         <button type="button" class="btn btn--primary btn--wide" id="start">Start transmitting</button>
-        <button type="button" class="btn btn--ghost" id="back">Choose a different file</button>
+        <button type="button" class="btn btn--ghost" id="back">Different file</button>
       </div>
-      <p class="warn" id="ready-warn" hidden></p>
     </div>
   </section>
 
-  <!-- ─────────────  STEP 3 · transmitting  ───────────── -->
+  <!-- ── 03 ── -->
   <section id="stage-send" class="stage stage--send" hidden>
     <div class="beam">
-      <div class="beam__plate">
-        <canvas id="qr" width="600" height="600" aria-label="Transmitting frame"></canvas>
+      <div class="plate">
+        <canvas id="qr" width="77" height="77" aria-label="Transmitting frame"></canvas>
       </div>
-      <p class="beam__caption"><span id="b-name">—</span> <span class="beam__sep">/</span> <span id="b-phase">—</span></p>
+      <p class="beam__caption"><span id="b-name">—</span><span class="beam__sep">/</span><span id="b-phase">—</span></p>
     </div>
 
     <aside class="rail">
-      <div class="telemetry">
+      <div class="slab slab--tele">
         <div class="tm tm--lead"><span class="tm__k">Frames sent</span><span class="tm__v" id="t-frames">0</span></div>
-        <div class="tm"><span class="tm__k">Rate</span><span class="tm__v" id="t-rate">—</span></div>
+        <div class="tm"><span class="tm__k">Actual rate</span><span class="tm__v" id="t-rate">—</span></div>
         <div class="tm"><span class="tm__k">Throughput</span><span class="tm__v" id="t-tput">—</span></div>
+        <div class="tm"><span class="tm__k">Peak sustained</span><span class="tm__v" id="t-peak">—</span></div>
         <div class="tm"><span class="tm__k">Elapsed</span><span class="tm__v" id="t-elapsed">0s</span></div>
         <div class="tm"><span class="tm__k">Chunks covered</span><span class="tm__v" id="t-cover">0</span></div>
         <div class="tm"><span class="tm__k">Frame carries</span><span class="tm__v" id="t-degree">—</span></div>
       </div>
 
-      <div class="ribbon-wrap">
-        <p class="eyebrow">Coverage — every chunk this run has put on screen at least once</p>
+      <div class="slab">
+        <p class="eyebrow">Coverage — every chunk put on screen at least once</p>
         <canvas id="ribbon" class="ribbon" height="30"></canvas>
-        <p class="ribbon__legend"><span class="dot dot--sent"></span>sent <span class="dot dot--live"></span>on screen now</p>
+        <p class="legend"><i class="dot dot--sent"></i>sent<i class="dot dot--live"></i>on screen now</p>
       </div>
 
       <div class="controls">
@@ -139,23 +196,30 @@
         <button type="button" class="btn btn--danger" id="stop">Stop</button>
       </div>
 
-      <div class="live-tune">
-        <label class="field">
-          <span class="field__label">Speed</span>
-          <input type="range" id="l-fps" min="2" max="30" step="1" value="10">
-          <output class="field__out" id="l-fps-out">10 fps</output>
-        </label>
-        <p class="hint">Receiver dropping frames? Slow down. Nothing is lost by going slower.</p>
+      <div class="slab">
+        <span class="field__label">Speed</span>
+        <div class="slider">
+          <input type="range" id="l-fps" min="2" max="120" step="1" value="10">
+          <output class="slider__out" id="l-fps-out">10</output>
+        </div>
+        <p class="fine" id="l-hint">Receiver dropping frames? Slow down. Nothing is lost by going slower.</p>
       </div>
 
-      <p class="privacy">The file stayed on this device. The screen is the only thing carrying it.</p>
+      <p class="privacy">The file stayed here. The screen is the only thing carrying it.</p>
     </aside>
   </section>
 
 </main>
 
 <footer class="foot">
-  <p>Open the receiver page on the other device and point its camera here.</p>
+  <div class="foot__row">
+    <p class="foot__note">Sending from <b>microservices.net.in/FTQRS</b></p>
+    <a class="foot__link" href="https://microservices.net.in/FTQRR">
+      <img src="icon.svg" alt="" width="28" height="28">
+      <span><b>Receive a file instead</b><i>microservices.net.in/FTQRR</i></span>
+      <em aria-hidden="true">→</em>
+    </a>
+  </div>
 </footer>
 
 <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
