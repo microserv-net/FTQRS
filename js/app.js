@@ -5,6 +5,8 @@ import {
   bytesToLatin1,
   dropletIndexes,
   DROPLET_OVERHEAD,
+  META_HEADER,
+  CRC_LEN,
   formatBytes,
   formatDuration,
   b64,
@@ -18,7 +20,58 @@ const REALISM = 1.35; // frames a real receiver needs vs a perfect one
 const META_EVERY = 20;
 const BIG_FILE = 64 * 1024 * 1024;
 
-const DEFAULTS = { fps: 10, frameBytes: 300, ecc: 'M', encrypt: false };
+/* Settings are expressed as the size of the code on screen, not as a byte
+   count. Module count is the thing the camera has to resolve; bytes are
+   whatever fits inside it, and leaving that slack unused is free throughput
+   thrown away. A 69-module code at ECC M holds 331 bytes, so that is what a
+   frame carries. */
+const DEFAULTS = { fps: 10, modules: 69, ecc: 'M', encrypt: false };
+
+const capCache = new Map();
+
+/** Largest packet, in bytes, that still fits inside a given module count. */
+function qrCapacity(modules, ecc) {
+  const key = modules + ecc;
+  if (capCache.has(key)) return capCache.get(key);
+  const probe = new Uint8Array(3000).fill(65);
+  const fits = (n) => {
+    try {
+      const qr = qrcode(0, ecc);
+      qr.addData(bytesToLatin1(probe.subarray(0, n)), 'Byte');
+      qr.make();
+      return qr.getModuleCount() <= modules;
+    } catch (e) {
+      return false;
+    }
+  };
+  let lo = 1;
+  let hi = 2953;
+  let best = 0;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (fits(mid)) {
+      best = mid;
+      lo = mid + 1;
+    } else hi = mid - 1;
+  }
+  capCache.set(key, best);
+  return best;
+}
+
+/* Every frame — droplet or metadata — is padded to exactly one frame length,
+   so the code never changes size mid-transfer. If the metadata will not fit
+   in the requested code, the code steps up a version rather than the
+   metadata frame silently rendering bigger than the rest. */
+function planFrames(metaProbe) {
+  let modules = settings.modules;
+  const needed = metaProbe ? META_HEADER + new TextEncoder().encode(JSON.stringify(metaProbe)).length + CRC_LEN : 0;
+  let capacity = qrCapacity(modules, settings.ecc);
+  while (needed > capacity && modules < 129) {
+    modules += 4;
+    capacity = qrCapacity(modules, settings.ecc);
+  }
+  return { modules, capacity, chunkSize: Math.max(1, capacity - DROPLET_OVERHEAD) };
+}
 
 /* Settings and transfer state are kept apart on purpose. Stopping a transfer
    clears the transfer; it must never leave a control showing one thing while
@@ -44,6 +97,7 @@ const state = {
   coveredCount: 0,
   liveIdx: [],
   plateModules: 0,
+  frameLen: 0,
   wakeLock: null,
   plainHash: null,
   hashing: false,
@@ -82,13 +136,19 @@ function syncSettingsUI() {
   $('l-fps').value = settings.fps;
   $('o-fps').textContent = settings.fps;
   $('l-fps-out').textContent = settings.fps;
-  $('s-density').value = String(settings.frameBytes);
+  $('s-density').value = String(settings.modules);
   $('s-ecc').value = settings.ecc;
   $('s-encrypt').checked = settings.encrypt;
   $('pw-wrap').hidden = !settings.encrypt;
   document.querySelectorAll('#fps-chips .chip').forEach((c) =>
     c.classList.toggle('is-on', Number(c.dataset.fps) === settings.fps)
   );
+  const here = qrCapacity(settings.modules, settings.ecc);
+  const alt = settings.ecc === 'L' ? null : qrCapacity(settings.modules, settings.ecc === 'Q' ? 'M' : 'L');
+  $('ecc-hint').textContent = alt
+    ? `The code stays the same size on screen either way — this only decides how much of it is data. ` +
+      `Dropping a level would carry ${alt - here} more bytes a frame.`
+    : 'The code stays the same size on screen either way — this only decides how much of it is data.';
   $('fps-hint').textContent =
     settings.fps > 60
       ? 'Above 60 needs a high-refresh screen on this side and a fast camera on the other. Watch the actual rate once running.'
@@ -110,7 +170,7 @@ $('fps-chips').addEventListener('click', (e) => {
   if (chip) setFps(chip.dataset.fps);
 });
 $('s-density').addEventListener('change', (e) => {
-  settings.frameBytes = parseInt(e.target.value, 10);
+  settings.modules = parseInt(e.target.value, 10);
   syncSettingsUI();
 });
 $('s-ecc').addEventListener('change', (e) => {
@@ -122,17 +182,42 @@ $('s-encrypt').addEventListener('change', (e) => {
   syncSettingsUI();
 });
 
+function metaProbe() {
+  // The real metadata, with placeholder values of the right shape, so the
+  // plan accounts for the actual filename length.
+  return {
+    n: state.file ? state.file.name : '',
+    s: state.file ? state.file.size : 0,
+    m: (state.file && state.file.type) || 'application/octet-stream',
+    k: 999999,
+    c: 9999,
+    h: '0'.repeat(64),
+    ph: settings.encrypt ? '0'.repeat(64) : undefined,
+    e: settings.encrypt ? { s: 'x'.repeat(24), i: 'x'.repeat(16), it: 250000 } : undefined,
+  };
+}
+
+function plan() {
+  return planFrames(metaProbe());
+}
+
 function chunkSize() {
-  return settings.frameBytes - DROPLET_OVERHEAD;
+  return plan().chunkSize;
 }
 
 function refreshEstimate() {
+  const p = plan();
+  $('density-hint').textContent =
+    `A ${p.modules}×${p.modules} code carrying ${p.capacity} bytes a frame` +
+    (p.modules !== settings.modules ? ' — stepped up so the file details fit in one frame.' : '.') +
+    ' Smaller codes survive blur, distance and cheap cameras; error correction trades payload for robustness.';
   if (!state.file) return;
-  const K = Math.max(1, Math.ceil((state.file.size + (settings.encrypt ? 16 : 0)) / chunkSize()));
+  const K = Math.max(1, Math.ceil((state.file.size + (settings.encrypt ? 16 : 0)) / p.chunkSize));
   const clean = K + Math.ceil(K / META_EVERY);
   $('r-chunks').textContent = K.toLocaleString();
   $('r-frames').textContent = clean.toLocaleString();
   $('r-time').textContent = formatDuration((clean * REALISM) / settings.fps) + ` at ${settings.fps} fps`;
+  $('r-frame').textContent = `${p.chunkSize} B in a ${p.modules}² code`;
 }
 
 /* ────────────────  what this device can actually sustain  ────────────────
@@ -143,7 +228,7 @@ function refreshEstimate() {
    fastest setting and the fastest transfer are rarely the same thing — the
    number worth maximising is bytes per second, not frames per second.  */
 
-const DENSITIES = [120, 300, 600, 1000];
+const CODE_SIZES = [45, 57, 69, 81, 93, 105, 121];
 
 function measureRefresh(frames = 32) {
   return new Promise((resolve) => {
@@ -203,7 +288,9 @@ async function runBenchmark() {
   const throttled = measured < 24;
   const hz = throttled ? 60 : measured;
   const rows = [];
-  for (const bytes of DENSITIES) {
+  for (const size of CODE_SIZES) {
+    const bytes = qrCapacity(size, settings.ecc);
+    if (!bytes) continue;
     const { ms, modules } = frameCost(bytes, settings.ecc);
     // 0.85 leaves the main thread room for the rest of the page; a rate you
     // cannot hold is worse than a slightly lower one you can.
@@ -223,22 +310,22 @@ async function runBenchmark() {
     rows
       .map(
         (r) =>
-          `<div class="bench__row${r === best ? ' is-best' : ''}"><span>${r.bytes} B</span>` +
-          `<span>QR ${r.modules}²</span><span>${r.ms.toFixed(1)} ms</span>` +
+          `<div class="bench__row${r === best ? ' is-best' : ''}"><span>${r.modules}² code</span>` +
+          `<span>${r.bytes} B</span><span>${r.ms.toFixed(1)} ms</span>` +
           `<span>${r.fps} fps</span><b>${formatBytes(r.goodput)}/s</b></div>`
       )
       .join('') +
-    `<p class="fine">Highest sustainable rate on this screen: <b>${best.bytes} B</b> at <b>${best.fps} fps</b>, ` +
+    `<p class="fine">Highest sustainable rate on this screen: a <b>${best.modules}² code</b> at <b>${best.fps} fps</b>, ` +
     `about <b>${formatBytes(best.goodput)}/s</b>. This is a ceiling for this device only. Bigger codes carry more ` +
     `but are harder to read across the gap, so if the receiver's count stalls, step down one size — its read rate ` +
     `decides the real speed, not this measurement.</p>` +
-    `<button type="button" class="btn btn--primary" id="bench-apply">Use ${best.bytes} B at ${best.fps} fps</button>`;
+    `<button type="button" class="btn btn--primary" id="bench-apply">Use a ${best.modules}² code at ${best.fps} fps</button>`;
 
   $('bench-apply').addEventListener('click', () => {
-    settings.frameBytes = best.bytes;
+    settings.modules = best.modules;
     settings.fps = best.fps;
     syncSettingsUI();
-    toast(`Set to ${best.bytes} B at ${best.fps} fps — about ${formatBytes(best.goodput)}/s.`);
+    toast(`Set to a ${best.modules}² code at ${best.fps} fps — about ${formatBytes(best.goodput)}/s.`);
   });
 
   btn.disabled = false;
@@ -364,15 +451,17 @@ $('start').addEventListener('click', async () => {
 
     const streamHash = encInfo ? new SHA256().update(payload).hex() : state.plainHash;
 
+    const p = plan();
+    state.frameLen = p.capacity;
     state.bytes = payload;
-    state.encoder = new FountainEncoder(payload, chunkSize());
+    state.encoder = new FountainEncoder(payload, p.chunkSize);
     state.tid = crypto.getRandomValues(new Uint16Array(1))[0];
     state.meta = {
       n: state.file.name,
       s: payload.length,
       m: state.file.type || 'application/octet-stream',
       k: state.encoder.K,
-      c: chunkSize(),
+      c: p.chunkSize,
       h: streamHash,
       ph: encInfo ? state.plainHash : undefined,
       e: encInfo || undefined,
@@ -418,7 +507,7 @@ function nextPacket() {
   if (state.frames % META_EVERY === 0) {
     lastDegree = 0;
     state.liveIdx = [];
-    return buildMeta(state.tid, state.meta);
+    return buildMeta(state.tid, state.meta, state.frameLen);
   }
   const seed = state.seed++;
   const payload = state.encoder.droplet(seed);
@@ -466,7 +555,10 @@ function drawFrame(packet) {
 
 function measurePlate() {
   let max = 0;
-  const probes = [buildMeta(state.tid, state.meta), buildDroplet(state.tid, 0, state.encoder.droplet(0))];
+  const probes = [
+    buildMeta(state.tid, state.meta, state.frameLen),
+    buildDroplet(state.tid, 0, state.encoder.droplet(0)),
+  ];
   for (const p of probes) {
     const qr = qrcode(0, settings.ecc);
     qr.addData(bytesToLatin1(p), 'Byte');
@@ -520,7 +612,7 @@ function tickTelemetry() {
   $('t-frames').textContent = state.frames.toLocaleString();
   $('t-rate').textContent = state.fpsEMA ? state.fpsEMA.toFixed(1) + ' fps' : '—';
   if (state.fpsEMA) {
-    const goodput = state.fpsEMA * chunkSize();
+    const goodput = state.fpsEMA * state.encoder.chunkSize;
     // ignore the first second, where the average has not settled
     if (elapsed() > 1.5 && goodput > state.peakGoodput) state.peakGoodput = goodput;
     $('t-tput').textContent = formatBytes(goodput) + '/s';
